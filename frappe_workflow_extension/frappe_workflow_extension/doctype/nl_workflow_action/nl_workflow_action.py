@@ -71,7 +71,7 @@ def has_permission(doc, user):
 
 
 def process_workflow_actions(doc, state):
-	workflow = get_workflow_name(doc.get("doctype"), doc.get("name"))
+	workflow = get_workflow_name(doc.get("doctype"), doc.get("name"), doc)
 	if not workflow:
 		return
 
@@ -504,7 +504,7 @@ def get_common_email_args(doc):
 
 def get_email_template_from_workflow(doc):
 	"""Return next_action_email_template for workflow state (if available) based on doc current workflow state."""
-	workflow_name = get_workflow_name(doc.get("doctype"), doc.get("name"))
+	workflow_name = get_workflow_name(doc.get("doctype"), doc.get("name"), doc)
 	doc_state = get_doc_workflow_state(doc)
 	template_name = frappe.db.get_value(
 		"NL Workflow Document State",
