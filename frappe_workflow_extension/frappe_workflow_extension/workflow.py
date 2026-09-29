@@ -13,7 +13,7 @@ from frappe.utils import cint
 
 
 def get_doc_workflow_state(doc):
-	workflow_name = get_workflow_name(doc.get("doctype"), doc.get("name"))
+	workflow_name = get_workflow_name(doc.get("doctype"), doc.get("name"), doc)
 	workflow_state_field = get_workflow_state_field(workflow_name)
 	return doc.get(workflow_state_field)
 
@@ -42,8 +42,63 @@ def get_closest_company_with_workflow(company: str, workflows: list[dict]) -> st
 	return None
 
 
+def document_exists(doctype: str | None, docname: str | int | None) -> bool:
+	"""Return True when the record already has a row in the database.
+
+	A new document already carries the name assigned by its naming series while
+	it only lives in memory, so a missing row is a normal state and not an
+	error.
+
+	Args:
+	    doctype: DocType the record belongs to.
+	    docname: Name of the record.
+
+	Returns:
+	    True when the record is stored already.
+	"""
+	return bool(doctype and docname and frappe.db.exists(doctype, docname))
+
+
+def get_scope_document(doctype: str, docname: str | int | None = None, doc=None):
+	"""Return the document a workflow is matched against.
+
+	Args:
+	    doctype: DocType of the document.
+	    docname: Name of the document, when known.
+	    doc: Document or payload the caller already holds. It is used as is,
+	        which saves a database read and lets unsaved documents resolve
+	        their workflow from memory.
+
+	Returns:
+	    The document, or None when it is neither passed nor stored yet.
+	"""
+	if doc is not None:
+		return doc
+
+	if not document_exists(doctype, docname):
+		return None
+
+	return frappe.get_doc(doctype, docname)
+
+
+def get_scope_value(doc, field: str):
+	"""Read a scoping field from a document or from a plain document payload.
+
+	Args:
+	    doc: Document or payload to read from, None when unavailable.
+	    field: Field to read.
+
+	Returns:
+	    The field value, or None when the document does not provide it.
+	"""
+	if doc is None:
+		return None
+
+	return doc.get(field) if hasattr(doc, "get") else getattr(doc, field, None)
+
+
 @frappe.whitelist()
-def get_workflow_name(doctype: str, docname: str | int | None = None) -> str | None:
+def get_workflow_name(doctype: str, docname: str | int | None = None, doc=None) -> str | None:
 	"""
 	Determine the most specific active workflow for a document based on:
 	Priority:
@@ -52,14 +107,25 @@ def get_workflow_name(doctype: str, docname: str | int | None = None) -> str | N
 	3️⃣ Accounting Dimensions
 	4️⃣ Cost Center
 	5️⃣ Project
+
+	Args:
+	    doctype: DocType of the document.
+	    docname: Name of the document, when known.
+	    doc: Document or payload the caller already holds, used to match the
+	        scoping fields. Unsaved documents have to be passed this way: they
+	        are already named by their naming series but cannot be read back
+	        from the database yet.
+
+	Returns:
+	    Name of the matching NL Workflow, or None when no workflow applies.
 	"""
 
-	doc = frappe.get_doc(doctype, docname) if docname else None
+	doc = get_scope_document(doctype, docname, doc)
 
-	company = getattr(doc, "company", None) or frappe.defaults.get_user_default("Company")
-	project = getattr(doc, "project", None)
-	cost_center = getattr(doc, "cost_center", None)
-	user = getattr(doc, "owner", None) or frappe.session.user
+	company = get_scope_value(doc, "company") or frappe.defaults.get_user_default("Company")
+	project = get_scope_value(doc, "project")
+	cost_center = get_scope_value(doc, "cost_center")
+	user = get_scope_value(doc, "owner") or frappe.session.user
 
 	if not company:
 		return None
@@ -94,7 +160,7 @@ def get_workflow_name(doctype: str, docname: str | int | None = None) -> str | N
 		if not accounting_dimensions or not doc:
 			return False
 		for dim in accounting_dimensions:
-			doc_val = getattr(doc, dim, None)
+			doc_val = get_scope_value(doc, dim)
 			wf_val = getattr(wf, dim, None)
 			if wf_val and doc_val and wf_val == doc_val:
 				return True
@@ -127,7 +193,7 @@ def get_workflow_name(doctype: str, docname: str | int | None = None) -> str | N
 
 @frappe.whitelist()
 def get_workflow(
-	doctype: str, docname: str | int | None = None, raise_exception: bool = True
+	doctype: str, docname: str | int | None = None, raise_exception: bool = True, doc=None
 ) -> Document | None:
 	"""Return cached NL Workflow document for the given doctype.
 
@@ -138,6 +204,8 @@ def get_workflow(
 	    raise_exception: Throw when no workflow applies. Callers that serve
 	        records possibly outside the workflow scope pass False and handle
 	        the missing workflow themselves.
+	    doc: Document or payload the caller already holds, used to match scoped
+	        workflows without another database read.
 
 	Returns:
 	    The matching NL Workflow document, or None when no workflow applies and
@@ -147,7 +215,7 @@ def get_workflow(
 	    frappe.ValidationError: If no workflow applies and raise_exception is
 	        True.
 	"""
-	workflow_name = get_workflow_name(doctype, docname)
+	workflow_name = get_workflow_name(doctype, docname, doc)
 	if not workflow_name:
 		if not raise_exception:
 			return None
@@ -189,9 +257,11 @@ def get_transitions(
 	"""
 
 	if not isinstance(doc, Document):
-		doc = frappe.get_doc(frappe.parse_json(doc))
-		if not doc.get("name"):
+		doc = frappe.parse_json(doc)
+		if not document_exists(doc.get("doctype"), doc.get("name")):
+			# New or deleted record: it has no state to transition from yet.
 			return []
+		doc = frappe.get_doc(doc)
 		doc.load_from_db()
 
 	if doc.is_new():
@@ -203,7 +273,7 @@ def get_transitions(
 	workflow_doc = (
 		frappe.get_doc("NL Workflow", workflow)
 		if workflow
-		else get_workflow(doc.doctype, doc.name, raise_exception=False)
+		else get_workflow(doc.doctype, doc.name, raise_exception=False, doc=doc)
 	)
 
 	if not workflow_doc or not workflow_doc.transitions:
@@ -273,7 +343,7 @@ def apply_workflow(doc, action, comment=None):
 	doc = frappe.get_doc(frappe.parse_json(doc))
 	doc.load_from_db()
 
-	workflow = get_workflow(doc.doctype, doc.name)
+	workflow = get_workflow(doc.doctype, doc.name, doc=doc)
 	transitions = get_transitions(doc, workflow.name)
 	user = frappe.session.user
 
@@ -410,7 +480,7 @@ def get_workflow_info(doc: dict | str):
 	if isinstance(doc, str):
 		doc = json.loads(doc)
 
-	workflow_name = get_workflow_name(doc.get("doctype"), doc.get("name"))
+	workflow_name = get_workflow_name(doc.get("doctype"), doc.get("name"), doc)
 	if not workflow_name:
 		return None
 
@@ -523,7 +593,7 @@ def validate_workflow(doc):
 	- Check if user is allowed to edit in current state
 	- Check if user is allowed to transition to the next state (if changed)
 	"""
-	workflow = get_workflow(doc.doctype, doc.name)
+	workflow = get_workflow(doc.doctype, doc.name, doc=doc)
 
 	current_state = None
 	if getattr(doc, "_doc_before_save", None):

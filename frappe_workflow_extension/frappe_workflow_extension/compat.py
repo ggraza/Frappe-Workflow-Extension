@@ -146,6 +146,10 @@ def can_cancel_document(doctype, docname: str | None = None) -> bool:
 def get_applicable_workflow(doc) -> str | None:
 	"""Return the NL Workflow governing `doc`, or None when there is none.
 
+	The document being validated is passed along: a new document is already
+	named by its naming series but has no row yet, so resolving its scope from
+	the database would fail.
+
 	Args:
 	    doc: Document being validated.
 
@@ -160,7 +164,7 @@ def get_applicable_workflow(doc) -> str | None:
 	if not is_nl_workflow_doctype(doc.doctype):
 		return None
 
-	return nl_workflow.get_workflow_name(doc.doctype, doc.name)
+	return nl_workflow.get_workflow_name(doc.doctype, doc.name, doc)
 
 
 def validate_workflow_document(doc, method: str | None = None) -> None:
